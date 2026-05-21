@@ -1,6 +1,8 @@
-# Virtual Protection Architecture Cluster — Red Hat Pattern
+# Virtual Protection Architecture — Red Hat Pattern
 
-A repeatable architectural pattern for deploying multi-vendor utility protection and automation workloads on a single Red Hat platform. This pattern follows the [vPAC Alliance's](https://vpacalliance.com/) software-defined architecture for substation protection, automation, and control; this document defines a specific Red Hat-based implementation of that vision. The deployment automation that puts it on hardware lives at [`github.com/RedHatEdge/ansible-vpac`](https://github.com/RedHatEdge/ansible-vpac).
+A repeatable architectural pattern for deploying multi-vendor utility protection and automation workloads on a Red Hat platform. This pattern follows the [vPAC Alliance's](https://vpacalliance.com/) software-defined architecture for substation protection, automation, and control; this document defines a specific Red Hat-based implementation of that vision. The deployment automation that puts it on hardware lives at [`github.com/RedHatEdge/ansible-vpac`](https://github.com/RedHatEdge/ansible-vpac).
+
+The pattern scales from a **single node** (small / secondary substations, retrofits, dev/lab) to a **3-node cluster** (production HA target). Both topologies share the same hypervisor, real-time tuning, time-sync, IEC 61850 plumbing, and vendor VMs — what changes between them is the cluster substrate.
 
 ---
 
@@ -18,31 +20,111 @@ This blueprint is a Red Hat-aligned implementation of that vision. It uses comme
 
 ---
 
-## The pattern in one paragraph
+## The pattern
 
-A Virtual Protection Architecture Cluster (vPAC) is three identical Red Hat Enterprise Linux servers behaving as one platform. The cluster hosts protection and automation software — IEC 61850 relays, RTAC/RTU/VPR applications, HMI workstations — as virtual machines, with deterministic real-time performance, shared storage so any VM runs on any node, sub-microsecond PTP time synchronization, and automatic failover when a node is lost.
+A Virtual Protection Architecture deployment is one or more identical Red Hat Enterprise Linux servers hosting utility protection and automation workloads as virtual machines. Whatever the node count, every deployment shares the same architectural commitments:
 
-The pattern delivers:
+- **RHEL 9 + kernel-rt** on every host — 10-year lifecycle, commercial support, relay-vendor certified
+- **KVM + libvirt** as the hypervisor — open, no vendor lock-in, line-rate paravirtualized NICs, fine-grained CPU pinning
+- **Real-time tuning** so VMs achieve deterministic latency — isolated CPU pool, 1 GiB hugepages, locked memory, FIFO scheduling, ballooning disabled, watchdog neutered; tail latency target under 120 µs
+- **IEC 61850 station bus + process bus** preserved end to end through the hypervisor — multicast pass-through, dedicated VLANs, no software re-timestamping
+- **Dedicated PTP NIC** synchronized to a Power Profile (IEEE C37.238 / IEC 61850-9-3) grandmaster; sub-microsecond time on every host
+- **IEC 62443 hardening baseline** — segmented networks, signed supply chain, audit forwarding, MFA on the management plane
+- **Multi-vendor relay hosting** — the **ABB SSC600** protection and control VM is the validated Red Hat × ABB reference workload; other vendor VMs (Schneider, Siemens, GE Vernova, Hitachi RTAC, Kalkitech), RTAC/VPR/PMU applications, and Windows engineering workstations with PCI NIC passthrough run on the same platform
 
-- Multi-vendor relay hosting on a single hardware footprint
-- Sub-microsecond PTP time sync for IEC 61850 GOOSE / Sampled Values
-- Real-time tail latency under 120 µs on every cluster node
-- 3× replicated shared storage (Red Hat Ceph Storage)
-- Automatic failover via Pacemaker with STONITH fencing
-- Belt-and-suspenders against split-brain via sanlock leases on the shared storage
+The pattern's value is the same regardless of scale: a single Red Hat-supported platform that hosts the substation's protection and automation software, decoupling the hardware refresh from the software refresh and letting the operator adopt new vendor VMs without changing the underlying stack.
 
-## Reference design
+---
+
+## Topologies
+
+The architecture above manifests in two reference topologies. Pick the one that matches site criticality and footprint constraints.
+
+### Single-node
+
+One RHEL 9 server hosting protection and automation VMs locally. Used at distribution-level and secondary substations, retrofit sites where a 3-node footprint won't fit, dev/lab environments, and any site where the resiliency profile is satisfied by **box-level redundancy at the grid level** (two independent single-node platforms per substation, or accepted risk for non-critical sites) rather than by clustering inside one box.
+
+What it has (everything from *The pattern* above), plus:
+- **Local storage** for VM disks — LVM thin pool, or local qcow2 on a fast SSD/NVMe pair
+- **Single libvirt host** managing VMs directly via `virsh` and standard libvirt tooling
+
+What it does NOT have (and does not need at N=1):
+- No Pacemaker / Corosync — no in-box failover
+- No Ceph — local storage only
+- No sanlock leases — no shared storage means no split-brain to defend against
+- No STONITH fencing — nothing to fence against
+- No quorum protocol
+
+**On hardware failure** at single-node, the box is down until repaired or replaced; VMs come back via the same deployment automation once the hardware is up, or are migrated to a hot spare provisioned identically. Resilience at this topology is the operator's grid-level redundancy program, not an in-box mechanism. The platform's commitment is deterministic real-time hosting, not high availability.
+
+### Three-node clustered
+
+Three identical RHEL 9 servers behaving as one platform. The cluster runs protection VMs continuously across the failure of any single node, with no operator intervention.
+
+What it adds beyond single-node:
+- **3-way replicated shared storage** via Red Hat Ceph Storage — MON+MGR+OSDs and a CephFS client on every node
+- **Automatic VM failover** via Pacemaker + Corosync with native majority quorum (2 of 3)
+- **STONITH (IPMI fencing)** to prevent split-brain after a node hang
+- **Sanlock leases on an RBD lockspace** as belt-and-suspenders against simultaneous Pacemaker + STONITH failure
+- **Any-VM-anywhere** — workload placement is decided by Pacemaker location constraints from inventory, not by per-node capability; identical hardware + identical software is what makes this property hold
+
+**On node failure** at three-node, the cluster fences the failed node, restarts its VMs on a survivor with CephFS already mounted, and re-balances per location constraints when the node rejoins. No operator action required.
+
+### Side-by-side
+
+| Dimension | Single-node | Three-node clustered |
+|---|---|---|
+| Hardware | 1 RHEL 9 server | 3 identical RHEL 9 servers (single vendor / SKU) |
+| Hypervisor | KVM + libvirt | KVM + libvirt — every node |
+| Real-time tuning | Per-VM pinning, hugepages, FIFO | Same — every node |
+| PTP | Dedicated NIC, Power Profile grandmaster | Same — every node |
+| IEC 61850 station + process bus | Preserved end to end | Same |
+| Storage | Local (LVM thin / qcow2) | Red Hat Ceph Storage, 3× replicated, CephFS + RBD |
+| HA / failover | None — operator intervention | Automatic via Pacemaker |
+| Fencing | N/A | STONITH via `fence_ipmilan` |
+| Split-brain protection | N/A (no shared state) | Sanlock-on-RBD + STONITH |
+| Quorum | N/A | Native majority (2 of 3) |
+| On node failure | Box down until repaired | Automatic failover; VMs running on survivors |
+| Typical site | Distribution / secondary substation, retrofit, dev/lab | Primary substation, transmission-level, critical infrastructure |
+
+The same RHEL build, RT tuning, KVM configuration, PTP setup, IEC 61850 plumbing, and vendor VMs work in both topologies. What differs is the cluster substrate.
+
+---
+
+## Reference design constraints
 
 The pattern is defined by a small number of deliberate constraints, not by a specific bill of materials. Any deployment that meets them implements the pattern.
 
-- **3 identical x86_64 servers from a single vendor** — Dell PowerEdge XR series, Advantech edge platforms, Supermicro / Crystal substation chassis, or any other Red Hat-certified server. Identical hardware is a deliberate constraint: it lets any VM run on any node after a failure without per-host quirks, and lets the deployment automation treat the three as fungible peers. Mixing chassis is supported but not recommended for a first deployment.
-- **5 logical networks** with mandatory separation for two of them (PTP and cluster heartbeat). See *Architecture → Network separation* below.
-- **Software stack:** RHEL 9.7+, Red Hat Ceph Storage 7, Pacemaker + Corosync (RHEL HA add-on), libvirt/KVM, PTP via `timemaster` + `ptp4l`, RT-tuned chrony for relay VMs.
-- **Workloads:** any combination of vendor protection VMs and station automation applications. The proven reference workload is the **ABB SSC600** protection and control VM — Red Hat's partnership with ABB is the validated end-to-end play for this pattern, with documented vendor guidance for CPU pinning, real-time priority, hugepages, and chrony tuning. Other vendor VMs (e.g. SEL, Hitachi RTAC, GE Multilin), RTAC/VPR/PMU applications, and Windows engineering workstations with PCI NIC passthrough for traffic capture run on the same platform alongside SSC600.
+- **Red Hat-certified x86_64 servers** — Dell PowerEdge XR, Advantech edge platforms, Supermicro / Crystal substation chassis, or equivalent. At three-node the three nodes are **identical hardware from a single vendor and SKU** — this lets any VM run on any node after a failure without per-host quirks, and lets deployment automation treat the three as fungible peers. Mixing chassis is supported but not recommended.
+- **Logical networks with mandatory separation:** *PTP* on its own NIC (all topologies); *cluster heartbeat* on its own NIC (three-node only). See *Network separation* below.
+- **Software stack:** RHEL 9.7+, libvirt/KVM, PTP via `timemaster` + `ptp4l`, RT-tuned chrony. Add Red Hat Ceph Storage 7 + RHEL HA add-on (Pacemaker + Corosync) at three-node.
+- **Workloads:** any combination of vendor protection VMs and station automation applications. The proven reference workload is the **ABB SSC600** protection and control VM — Red Hat's partnership with ABB is the validated end-to-end play for this pattern, with documented vendor guidance for CPU pinning, real-time priority, hugepages, and chrony tuning.
+
+---
 
 ## Architecture
 
-A vPAC cluster is three RHEL 9 servers behaving as one platform: any of the three can host any virtual machine, shared storage means VM disks are reachable from every node, and a quorum protocol decides who gets to run what after a failure. The diagram below shows what's running on each node and how the layers stack.
+### Single-node
+
+```mermaid
+flowchart TB
+  subgraph node[Single RHEL 9 node]
+    direction TB
+    workload["VMs<br/>(ABB SSC600 + others)"]
+    libvirt["KVM + libvirt<br/>RT tuning"]
+    storage["Local storage<br/>(LVM thin / qcow2)"]
+    rhel["RHEL 9 + kernel-rt"]
+    workload --> libvirt --> rhel
+    storage --> rhel
+  end
+
+  GM["External PTP grandmaster<br/>(GPS-disciplined)"] -. dedicated NIC .-> node
+  BMC["Out-of-band BMC<br/>(remote management)"] -. mgmt .-> node
+```
+
+A single host with the full real-time / PTP / IEC 61850 stack, but no cluster substrate. The BMC remains an out-of-band management path even though it has no fencing role at N=1.
+
+### Three-node clustered
 
 ```mermaid
 flowchart TB
@@ -89,7 +171,7 @@ flowchart TB
   BMC["Out-of-band BMCs<br/>(STONITH path)"] -. fence .-> cluster
 ```
 
-Every node runs the identical software stack: same RHEL 9 + kernel-rt, same RT-tuned KVM/libvirt, same Ceph daemons (MON+MGR+OSDs and a CephFS client), same Pacemaker + Corosync membership, dedicated PTP NIC synchronized to the same external grandmaster. Workload placement across the three nodes is decided by Pacemaker location constraints from inventory, NOT by per-node capability differences — any VM can run on any node, and after a failure Pacemaker is free to place a VM on whichever survivor satisfies its constraints. Identical hardware + identical software is what makes this property hold.
+Every node runs the identical software stack: same RHEL 9 + kernel-rt, same RT-tuned KVM/libvirt, same Ceph daemons, same Pacemaker + Corosync membership, dedicated PTP NIC synchronized to the same external grandmaster. Workload placement is decided by Pacemaker location constraints, NOT by per-node capability differences — any VM can run on any node, and after a failure Pacemaker is free to place a VM on whichever survivor satisfies its constraints. Identical hardware + identical software is what makes this property hold.
 
 ### Network separation
 
@@ -97,7 +179,7 @@ The five logical networks below MUST land on separate NICs (or at least separate
 
 ```mermaid
 flowchart LR
-  subgraph node["Each cluster node — physical NICs"]
+  subgraph node["Each host — physical NICs"]
     direction TB
     mgmt["mgmt bond → br-mgmt"]
     storage["storage bond — no bridge"]
@@ -119,34 +201,48 @@ flowchart LR
   ptp:::mustdedicate
 ```
 
-- **Heartbeat must be dedicated** because corosync packet loss is interpreted as node failure. Bridge churn from VM lifecycle events on a shared `br-mgmt` will cause periodic STP reconvergence, drop heartbeats, and split the cluster — the most expensive failure mode in any HA system.
-- **PTP must be dedicated** because PTP event messages travel as ordinary Ethernet frames; if the same NIC is bridged into a VM, the kernel's bridge handling can deliver PTP frames to the guest instead of to the host's `ptp4l`. The result is the host clock drifts free, relay VMs miss timing windows, and `SYNCHRONIZATION_FAULT` events fire continuously.
-- The other three networks (mgmt, storage, station) tolerate VLAN sharing with their respective workloads, but the architecture is cleanest when each is its own bond.
+- **PTP must be dedicated** (all topologies) because PTP event messages travel as ordinary Ethernet frames; if the same NIC is bridged into a VM, the kernel's bridge handling can deliver PTP frames to the guest instead of to the host's `ptp4l`. The result is the host clock drifts free, relay VMs miss timing windows, and `SYNCHRONIZATION_FAULT` events fire continuously.
+- **Heartbeat must be dedicated** (three-node only) because corosync packet loss is interpreted as node failure. Bridge churn from VM lifecycle events on a shared `br-mgmt` will cause periodic STP reconvergence, drop heartbeats, and split the cluster — the most expensive failure mode in any HA system.
+- The other networks (mgmt, station, plus storage at three-node) tolerate VLAN sharing with their respective workloads, but the architecture is cleanest when each is its own bond. At single-node, the dedicated storage network collapses to local-disk paths and is not required as a separate fabric.
 
 ### Components and why
 
-| Component | Why |
-|---|---|
-| RHEL 9 | 10-year lifecycle, real-time extensions, commercial support, relay-vendor certified |
-| KVM + libvirt | Open, no vendor lock-in, line-rate paravirtualized NICs, fine-grained CPU pinning |
-| Ceph + CephFS | Shared VM storage so any VM runs on any node after a failure; 3× replication; no proprietary SAN |
-| Pacemaker + Corosync | Automatic VM failover; proven in utility and telecom HA deployments |
-| STONITH (IPMI fencing) | Prevents split-brain: the #1 failure mode in HA clusters |
-| PTP (IEEE 1588) | Sub-µs time sync; required for IEC 61850 SV and GOOSE determinism |
-| tuned / isolcpus / hugepages | Deterministic VM latency; well under relay timing budgets |
+| Component | Topologies | Why |
+|---|---|---|
+| RHEL 9 + kernel-rt | All | 10-year lifecycle, real-time extensions, commercial support, relay-vendor certified |
+| KVM + libvirt | All | Open, no vendor lock-in, line-rate paravirtualized NICs, fine-grained CPU pinning |
+| `tuned` / isolcpus / hugepages | All | Deterministic VM latency well under relay timing budgets |
+| PTP (IEEE 1588 / Power Profile) | All | Sub-µs time sync; required for IEC 61850 SV and GOOSE determinism |
+| Local storage (LVM thin / qcow2) | Single-node | Simplest viable VM disk path at N=1; no shared-storage operational surface |
+| Red Hat Ceph Storage + CephFS | Three-node | Shared VM storage so any VM runs on any node after a failure; 3× replication; no proprietary SAN |
+| RHEL HA add-on (Pacemaker + Corosync) | Three-node | Automatic VM failover; proven in utility and telecom HA deployments |
+| STONITH (IPMI fencing) | Three-node | Prevents split-brain: the #1 failure mode in HA clusters |
+| Sanlock-on-RBD lockspace | Three-node | Defense in depth against simultaneous Pacemaker + STONITH failure |
 
 ## Real-time guarantees
 
-The architecture commits every cluster node to a deterministic-latency posture so any protection VM can run anywhere:
+The architecture commits every host to a deterministic-latency posture so any protection VM can run anywhere:
 
 - Per-VM CPU pinning with isolated cores (kernel scheduler avoids them)
 - 1 GiB hugepages backing relay VM memory
 - Memory ballooning disabled, memory locked
 - FIFO scheduling priority per VM (configurable per vendor's requirements)
-- RT chrony tuning on every cluster node (`lock_all`, elevated `sched_priority`)
-- Tail latency target under 120 µs on every cluster node
+- RT chrony tuning on every host (`lock_all`, elevated `sched_priority`)
+- Tail latency target under 120 µs on every host
 
 ## Behavior on failure
+
+### Single-node
+
+If the host fails, all VMs on it stop. Recovery is:
+
+1. The hardware fault is identified by site operators or a centralized monitoring path (BMC alerting, SNMP, IPMI).
+2. The hardware is repaired or swapped to a hot spare provisioned identically.
+3. VMs are brought back via the same deployment automation that originally placed them.
+
+Resilience at this topology is the operator's grid-level redundancy program, not the platform.
+
+### Three-node clustered
 
 What the cluster does autonomously when a node is lost:
 
@@ -185,15 +281,17 @@ Why each architectural choice was made over its plausible alternatives:
 
 | Choice | Why this rather than alternatives |
 |---|---|
-| **Three nodes, not two** | Quorum requires majority. Two-node clusters need an external quorum device (qdevice) which adds a single point of failure. Three nodes give majority quorum natively. |
-| **CephFS for VM disks (not NFS)** | NFS requires a dedicated NFS server (single point of failure) or pNFS (operationally complex). CephFS is the storage cluster — same daemons, no extra layer to manage. |
+| **Two reference topologies (1-node and 3-node), not a continuum** | The same pattern applies at both scales. N=1 serves small / distribution sites and dev/lab; N=3 is the production HA target. N=2 is not a reference topology — two-node clusters need an external quorum device (qdevice) which adds a single point of failure. N≥4 is not the documented reference; the architecture does not preclude it. |
+| **Three nodes (when clustered), not two** | Quorum requires majority. Two-node clusters need a qdevice. Three nodes give majority quorum natively without an external arbiter. |
+| **CephFS for VM disks (not NFS)** | NFS requires a dedicated NFS server (single point of failure) or pNFS (operationally complex). CephFS is the storage cluster — same daemons, no extra layer. |
 | **RBD for the sanlock lockspace** | Sanlock needs a small shared block device with deterministic access semantics. CephFS doesn't expose block; RBD does. The lockspace image is small and rarely touched. |
-| **Pacemaker `VirtualDomain` (OpenShift Virt)** | A 3-node substation cluster doesn't need a multi-tenant scheduler. Pacemaker's `VirtualDomain` is the simplest tool that solves the failover problem, with a 20-year operational track record in utility / telco. |
-| **`fence_ipmilan` (not `fence_scsi`, `fence_sbd`)** | IPMI is universal on enterprise BMCs and provides hard power off — the only fencing mechanism that survives a kernel hang. SCSI fencing requires shared SCSI; SBD requires a watchdog timeout that's longer than RT scheduling latency. |
+| **Pacemaker `VirtualDomain` — NOT OpenShift Virtualization, NOT OpenStack** | A substation deployment doesn't need a multi-tenant scheduler. Pacemaker's `VirtualDomain` resource agent on libvirt/KVM is the simplest tool that solves the VM failover problem, with a 20-year operational track record in utility / telco. OpenShift Virtualization (KubeVirt) and OpenStack target multi-tenant compute — different problem, different operational and certification surface, different scale assumptions. The pattern is RHEL + KVM + Pacemaker + Ceph; it is not a containers-on-Kubernetes pattern. |
+| **`fence_ipmilan` (not `fence_scsi`, `fence_sbd`)** | IPMI is universal on enterprise BMCs and provides hard power off — the only fencing mechanism that survives a kernel hang. SCSI fencing requires shared SCSI; SBD requires a watchdog timeout longer than RT scheduling latency. |
 | **`timemaster` (not pure `ptp4l` + `chronyd`)** | Two daemons fighting for the system clock is a documented operational hazard. `timemaster` is a single supervisor that arbitrates correctly. |
 | **Power Profile P2P, L2 transport** | IEEE C37.238 is the substation profile — peer-to-peer with transparent clocks in the network. Most utility networks are built this way. |
 | **`virt-sanlock` SELinux boolean ON** | Defense in depth. Even if Pacemaker AND fencing both fail simultaneously, sanlock's lockspace lease prevents simultaneous VM start on two nodes against the same disk. |
+| **Local storage at single-node, not "Ceph-of-one"** | A single-node Ceph deployment has the operational complexity of Ceph without any of its resiliency benefits. LVM thin or local qcow2 is the simpler, fully supported VM disk path at N=1. |
 
 ---
 
-_How to deploy, operate, and validate a cluster that implements this pattern: [`github.com/RedHatEdge/ansible-vpac`](https://github.com/RedHatEdge/ansible-vpac)._
+_How to deploy, operate, and validate a deployment that implements this pattern: [`github.com/RedHatEdge/ansible-vpac`](https://github.com/RedHatEdge/ansible-vpac)._
