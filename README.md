@@ -32,6 +32,8 @@ The alliance promotes virtualized hosting of vendor protection and automation so
 
 This blueprint is a Red Hat-aligned implementation of that vision. It uses commercially-supported open-source components — Red Hat Enterprise Linux, Red Hat Ceph Storage, the RHEL HA add-on (Pacemaker + Corosync), KVM/libvirt, and Linux PTP — to realize the alliance's software-defined / open / interoperable principles in a deployable form. Other vendors and partners may produce different implementations of the same vision; the alliance's value is the shared architectural language across them, so utilities can reason about substation virtualization as a category instead of as a per-vendor proprietary system.
 
+For a layered, diagram-driven view that maps the industry VPR reference model onto each Red Hat component — substation context, end-to-end signal path, the real-time platform stack, and the HA topology — see **[REFERENCE-ARCHITECTURE.md](REFERENCE-ARCHITECTURE.md)**.
+
 ---
 
 ## The pattern
