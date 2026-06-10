@@ -1,196 +1,107 @@
-# Red Hat Virtual Protection reference architecture
+# Reference architecture
 
-The vPAC Alliance / Intel "Virtual Protection Relay" whitepaper describes the VPR
-concept in **vendor-neutral** terms — an IEC 61850 digital substation whose
-bay-level IEDs are collapsed into protection VMs on a real-time virtualized host.
-This document keeps that reference model and plugs in the **Red Hat
-implementation** for each layer: RHEL (image-mode), KVM/libvirt, the real-time
-stack, Pacemaker/Ceph for high availability, and `linuxptp` for time.
+Two ways to deploy a Red Hat Virtual Protection host, from the same platform and
+the same generic node image: a **single node** for non-critical or cost-sensitive
+sites, and a **three-node high-availability cluster** where a relay must survive
+the loss of a host. Both run the vendor's IEC 61850 protection software as a VM
+on real-time-tuned RHEL.
 
-Source model: *Virtual Protection Relay — A Paradigm Shift in Power System
-Protection* (vPAC Alliance / Intel / Kalkitech), Figures 2–8. All diagrams below
-are original Mermaid representations and render natively on GitHub.
+The diagrams below render natively on GitHub. Red = the part Red Hat provides;
+grey = field/operator equipment outside Red Hat's scope.
 
 ---
 
-## 1. Substation context (IEC 61850) — where the host sits
+## Single node
 
-The reference model (whitepaper Fig 2) splits a digital substation into three
-levels joined by a **process bus** (raw current/voltage as Sampled Values, plus
-GOOSE) and a **station bus** (MMS/GOOSE to SCADA and operators). The Red Hat VPR
-host replaces a rack of discrete bay-level IEDs with protection VMs.
+The minimal deployment: one real-time RHEL host (built as an image-mode / bootc
+image) running the protection relay VM against local storage. No clustering, no
+shared storage — fewer moving parts, lower cost, and a single point of failure
+that is acceptable for many sites.
 
 ```mermaid
 flowchart LR
-    subgraph FIELD["Process level (field)"]
+    MU["Merging units + breakers<br/>(field I/O)"]
+    OPS["SCADA / HMI / engineering"]
+    GM["PTP grandmaster"]
+
+    subgraph NODE["Red Hat Virtual Protection host — single node"]
         direction TB
-        CTPT["CT / PT<br/>current + voltage sensors"]
-        MU["Merging Unit (MU)"]
-        BCU["Breaker Control Unit (BCU)"]
-        CTPT --> MU
+        RT["RHEL 9 image-mode (bootc)<br/>kernel-rt · tuned · isolated CPUs · 1 GiB hugepages"]
+        RELAY["Protection relay VM<br/>vendor IEC 61850 stack (SV · GOOSE · MMS)"]
+        DISK["Local storage"]
+        RT --> RELAY --> DISK
     end
 
-    subgraph BAY["Bay level — virtualized"]
-        direction TB
-        HOST["Red Hat VPR host<br/>protection VMs replace discrete IEDs"]
-    end
-
-    subgraph STATION["Station level"]
-        direction TB
-        SCADA["SCADA"]
-        HMI["HMI / operator"]
-        ENG["Engineering + DR analysis"]
-    end
-
-    MU -- "Sampled Values (61850-9-2)" --> PB(["Process bus<br/>HSR/PRP, PTP-synced"])
-    BCU -- "GOOSE" --> PB
-    PB --> HOST
-    HOST --> SB(["Station bus<br/>MMS / GOOSE / HTTPS"])
-    SB --> SCADA
-    SB --> HMI
-    SB --> ENG
-    HOST -. "trip (GOOSE)" .-> BCU
+    MU -- "process bus · SV / GOOSE" --> RELAY
+    RELAY -- "station bus · MMS / GOOSE" --> OPS
+    GM -- "dedicated PTP NIC" --> RT
+    RELAY -. "trip · GOOSE" .-> MU
 
     classDef rh fill:#ee0000,stroke:#a30000,color:#fff;
-    class HOST rh;
+    class NODE,RT,RELAY,DISK rh;
 ```
-
-> Red in every diagram = the part Red Hat provides. Field devices (MU/BCU,
-> CT/PT) and the SCADA/operator front end are unchanged customer/vendor kit.
 
 ---
 
-## 2. The Red Hat VPR host — end-to-end signal path
+## Three-node, high availability
 
-This is the whitepaper's master reference application (Fig 8) with the Red Hat
-platform plugged in. Sampled Values arrive from the process bus, are processed by
-the vendor protection stack inside a **Virtual IED** VM, and a trip is published
-back as GOOSE — all on a real-time-tuned RHEL/KVM host.
+The same host image, deployed on three machines that form a cluster. If a host
+fails, its relay VM restarts on another host automatically. This adds the three
+ingredients single-node leaves out: **Pacemaker** to orchestrate failover,
+**STONITH** to fence a failed host before its VM restarts elsewhere, and
+**Ceph** to give every host access to the same relay disk.
 
 ```mermaid
 flowchart TB
-    subgraph INGRESS["From the process bus"]
-        SV["SV streams (61850-9-2)"]
-        GIN["GOOSE in"]
+    SUB["Substation — process bus · station bus · PTP<br/>(field I/O + operators)"]
+
+    subgraph CLUSTER["Red Hat Virtual Protection cluster — three identical hosts"]
+        direction LR
+        N1["Host A<br/>relay VM"]
+        N2["Host B<br/>relay VM"]
+        N3["Host C<br/>(standby capacity)"]
     end
 
-    subgraph HOST["Red Hat VPR host (RHEL + KVM)"]
-        direction TB
+    PCS["Pacemaker + corosync + STONITH<br/>dedicated heartbeat network · fences a failed host"]
+    CEPH["Ceph shared storage (RBD)<br/>relay disks + sanlock leases — any host can run any relay"]
 
-        subgraph NICV["NIC virtualization"]
-            SRIOV["SR-IOV VFs / macvtap (VEPA)<br/>process bus → VM, low latency"]
-        end
-
-        subgraph VIED["Virtual IED — vendor protection VM"]
-            direction TB
-            SVSUB["SV subscriber"]
-            COND["Signal conditioning / phasor estimation"]
-            PF["Protection functions<br/>21 · 50 · 51 · 50N · 51N · 87T · 50BF"]
-            MMS["MMS server + GOOSE pub/sub"]
-            SVSUB --> COND --> PF --> MMS
-        end
-
-        SRIOV --> SVSUB
-        PTP["linuxptp (ptp4l / phc2sys)<br/>dedicated PTP NIC"] -. "PHC time" .-> VIED
-    end
-
-    subgraph EGRESS["To the station bus"]
-        GOUT["GOOSE trip → breaker"]
-        REPORT["MMS reports → SCADA / HMI"]
-    end
-
-    SV --> SRIOV
-    GIN --> SRIOV
-    MMS --> GOUT
-    MMS --> REPORT
+    SUB === CLUSTER
+    PCS --- CLUSTER
+    CEPH --- CLUSTER
+    N1 -. "VM fails over on host loss" .-> N3
 
     classDef rh fill:#ee0000,stroke:#a30000,color:#fff;
-    classDef vendor fill:#7b3fbf,stroke:#4a2575,color:#fff;
-    class SRIOV,PTP,HOST rh;
-    class VIED,SVSUB,COND,PF,MMS vendor;
+    class CLUSTER,N1,N2,N3,PCS,CEPH rh;
 ```
 
 ---
 
-## 3. The Red Hat platform stack (real-time enablement)
+## What both share
 
-The whitepaper's real-time enablement (Fig 5, Intel TCC) and server/NIC layers
-(Fig 6) map directly onto the Red Hat real-time stack. Bottom to top:
+Every deployment — one node or three — is built from the **same generic Red Hat
+node image** and made site-specific by an Ansible variable file at deploy time.
+The platform commitments are identical:
 
-```mermaid
-flowchart TB
-    HW["Hardware — IEC 61850-3 / IEEE 1613 server<br/>NIC with HSR/PRP + PTP + SR-IOV"]
-    OS["RHEL 9 (image-mode / bootc)<br/>kernel-rt · isolcpus / nohz_full / rcu_nocbs"]
-    TUNE["Real-time tuning<br/>tuned realtime-virtual-host · 1 GiB hugepages<br/>resctrl / Cache Allocation (LLC isolation) · perf governor"]
-    TIME["Time sync — linuxptp on a dedicated NIC<br/>NTP sources removed when PTP is authoritative"]
-    VIRT["Virtualization — KVM + libvirt (modular sockets)<br/>CPU pinning · locked hugepage memory · no memballoon / watchdog"]
-    HA["High availability (3-node) — Pacemaker + corosync<br/>STONITH fencing · Ceph (CephFS / RBD) · sanlock leases"]
-    APP["Virtual IED VMs — vendor protection stacks<br/>ABB SSC600 (virtio) · NovaTech Orion (SATA + e1000)"]
+- **RHEL 9 + kernel-rt** real-time host, tuned (`realtime-virtual-host`), with
+  isolated CPUs, 1 GiB hugepages, and LLC isolation for deterministic latency
+- **KVM + libvirt** hosting the vendor relay VM with pinned vCPUs, locked
+  hugepage memory, and the real-time XML invariants
+- **linuxptp** time synchronization on a dedicated NIC
+- **Separated networks** — management, station bus, process bus, and PTP kept
+  apart; the cluster adds a dedicated heartbeat network
 
-    HW --> OS --> TUNE --> TIME --> VIRT --> HA --> APP
-
-    classDef rh fill:#ee0000,stroke:#a30000,color:#fff;
-    classDef vendor fill:#7b3fbf,stroke:#4a2575,color:#fff;
-    class OS,TUNE,TIME,VIRT,HA rh;
-    class APP vendor;
-    style HW fill:#444,stroke:#000,color:#fff;
-```
+The three-node cluster simply layers **Pacemaker + corosync + STONITH** and
+**Ceph** on top of that shared base. Single node is the same platform with those
+high-availability layers removed.
 
 ---
 
-## 4. High availability — single node vs 3-node cluster
+## Choosing between them
 
-The whitepaper notes a VPR gains redundancy from the "host server or VM
-management console" handling failover (Fig 7). Red Hat implements that with
-**Pacemaker/corosync + STONITH** for orchestration and **Ceph** for the shared
-disk a VM needs to restart on another node. Single-node skips all of it.
-
-```mermaid
-flowchart TB
-    subgraph SINGLE["Single node (image-mode)"]
-        direction TB
-        S1["RHEL image-mode host<br/>local file-backed relay disk<br/>no Pacemaker / Ceph / STONITH"]
-    end
-
-    subgraph CLUSTER["3-node cluster"]
-        direction TB
-        PCS["Pacemaker + corosync (dedicated heartbeat net)<br/>VirtualDomain resources · STONITH fencing"]
-        CEPH["Ceph — CephFS / RBD shared storage<br/>relay disks + sanlock leases"]
-        N1["Node A"]
-        N2["Node B"]
-        N3["Node C"]
-        PCS --- N1 & N2 & N3
-        CEPH --- N1 & N2 & N3
-        N1 -. "VM fails over" .-> N2
-    end
-
-    classDef rh fill:#ee0000,stroke:#a30000,color:#fff;
-    class S1,PCS,CEPH rh;
-```
-
----
-
-## 5. Reference model → Red Hat implementation
-
-| Whitepaper concept | Fig | Red Hat implementation |
+| | Single node | Three-node cluster |
 |---|---|---|
-| Virtualized host / hypervisor | 3–7 | **RHEL + KVM + libvirt** (modular sockets); image-mode (bootc) for single-node |
-| Software container option | 2.3 | **Podman** (per-function microservices where used) |
-| Real-time board support package | 5 | **kernel-rt**, `isolcpus`/`nohz_full`/`rcu_nocbs`, 1 GiB hugepages |
-| Real-time tuning / TCC tools | 5 | **tuned `realtime-virtual-host`**, performance governor |
-| Cache Allocation (LLC isolation) | 2.4.1 | **resctrl** mount + CAT classes pinned to the relay's cores |
-| Deterministic ~5 ms system timescale | 2.4.2 | pinned vCPUs + `SCHED_FIFO` (SSC600 prio 50, Orion 40), locked memory |
-| Precision Time Protocol | 2.4.3 | **linuxptp** (`ptp4l`/`phc2sys`) on a **dedicated** NIC; NTP removed |
-| Next-gen NIC (HSR/PRP, PTP, SR-IOV) | 2.4.4 / 6 | **SR-IOV VFs / macvtap (VEPA)** to the process bus; PTP-capable NIC |
-| Process bus (SV + GOOSE) | 2 / 8 | dedicated **process-bus** interface, reserved, macvtap-attached |
-| Station bus (MMS / GOOSE) | 2 / 8 | **station-bus** Linux bridge; mgmt bridge for the host |
-| VPR redundancy / HA cluster | 7 | **Pacemaker + corosync + STONITH** on a dedicated heartbeat network |
-| Shared storage for VM failover | 7 | **Ceph** (CephFS / RBD) + **sanlock** leases (3-node only) |
-| Virtual IED (SV sub, conditioning, PF, MMS) | 3/4/8 | the **vendor relay VM** (ABB SSC600 / NovaTech Orion), hosted unchanged |
-| Front end (SCADA, HMI, config, DR) | 8 | customer/vendor side, unchanged — reached over the station bus |
-
----
-
-*Field devices (MU/BCU, CT/PT) and the SCADA/operator front end are out of Red
-Hat's scope and shown only for context. Everything marked red is delivered by the
-Red Hat platform.*
+| Survives a host failure | No | Yes — relay restarts on another host |
+| Storage | Local disk | Ceph (shared, replicated) |
+| Failover orchestration | — | Pacemaker + corosync + STONITH |
+| Hardware | One host | Three hosts + cluster networking |
+| Best for | Cost-sensitive or non-critical sites, labs, evaluation | Protection that must stay available through a host loss |
