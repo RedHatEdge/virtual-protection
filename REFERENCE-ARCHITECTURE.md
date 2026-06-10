@@ -13,10 +13,9 @@ grey = field/operator equipment outside Red Hat's scope.
 
 ## Single node
 
-The minimal deployment: one real-time RHEL host (built as an image-mode / bootc
-image) running the protection relay VM against local storage. No clustering, no
-shared storage — fewer moving parts, lower cost, and a single point of failure
-that is acceptable for many sites.
+The minimal deployment: one real-time RHEL host running the protection relay VM
+against local storage. No clustering, no shared storage — fewer moving parts,
+lower cost, and a single point of failure that is acceptable for many sites.
 
 ```mermaid
 flowchart LR
@@ -26,7 +25,7 @@ flowchart LR
 
     subgraph NODE["Red Hat Virtual Protection host — single node"]
         direction TB
-        RT["RHEL 9 image-mode (bootc)<br/>kernel-rt · tuned · isolated CPUs · 1 GiB hugepages"]
+        RT["RHEL 9 + kernel-rt real-time host<br/>tuned · isolated CPUs · 1 GiB hugepages"]
         RELAY["Protection relay VM<br/>vendor IEC 61850 stack (SV · GOOSE · MMS)"]
         DISK["Local storage"]
         RT --> RELAY --> DISK
@@ -78,9 +77,9 @@ flowchart TB
 
 ## What both share
 
-Every deployment — one node or three — is built from the **same generic Red Hat
-node image** and made site-specific by an Ansible variable file at deploy time.
-The platform commitments are identical:
+Every deployment — one node or three — is the **same Red Hat real-time host**,
+made site-specific by an Ansible variable file at deploy time. The platform
+commitments are identical:
 
 - **RHEL 9 + kernel-rt** real-time host, tuned (`realtime-virtual-host`), with
   isolated CPUs, 1 GiB hugepages, and LLC isolation for deterministic latency
@@ -93,6 +92,10 @@ The platform commitments are identical:
 The three-node cluster simply layers **Pacemaker + corosync + STONITH** and
 **Ceph** on top of that shared base. Single node is the same platform with those
 high-availability layers removed.
+
+How that host is provisioned — a conventional package-based install or an
+image-mode (bootc) image — is a delivery flavor, not a change to the
+architecture. Either produces the same real-time host.
 
 ---
 
