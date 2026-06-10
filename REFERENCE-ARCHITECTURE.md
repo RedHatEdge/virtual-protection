@@ -75,6 +75,46 @@ flowchart TB
 
 ---
 
+## Relay workloads — VMs and containers
+
+The platform hosts the vendor's IEC 61850 protection software **unmodified**. A
+relay can run as a full VM or as a container, and the platform adapts to whatever
+the vendor ships — paravirtualized or not, VM or container. The deployment's
+Ansible variable file selects the right profile per relay, so one host can run a
+virtio VM, a non-virtio VM, and a container side by side.
+
+```mermaid
+flowchart TB
+    BUS["Process bus (SV / GOOSE) · station bus (MMS) · PTP"]
+
+    subgraph HOST["Red Hat real-time host — RHEL + KVM + Podman"]
+        direction LR
+        SSC["ABB SSC600<br/>VM · virtio"]
+        ORION["NovaTech Orion<br/>VM · SATA + e1000"]
+        EUTO["euto<br/>Podman container"]
+    end
+
+    BUS === HOST
+
+    classDef rh fill:#ee0000,stroke:#a30000,color:#fff;
+    class HOST rh;
+```
+
+> Red = the Red Hat platform; the boxes inside are the vendor relay workloads it
+> hosts (Red Hat provides the host, not the relay software).
+
+| Relay | Packaging | Host adaptation | Delivery |
+|---|---|---|---|
+| **ABB SSC600** | VM (virtio) | guest has virtio → virtio disk + NICs; vCPUs pinned, `SCHED_FIFO` 50 | `.cab` → raw KVM image; licensed per-VM via ABB PCM600 after boot |
+| **NovaTech Orion** | VM (non-virtio) | Photon OS guest has no virtio → **SATA disk + e1000 NIC**; `SCHED_FIFO` 40 | VMware OVA → qcow2 / raw; rendered with the `vpr` profile |
+| **euto** | Podman container | no VM, no guest OS — **shares the host real-time kernel**; pinned via cgroup cpuset, managed by systemd (Quadlet) | OCI container image → `podman` |
+
+The common thread is one Red Hat real-time host with several packaging models on
+it. A VM gives stronger isolation and runs a vendor's exact appliance image
+untouched; a container is lighter and shares the host kernel — pick per workload.
+
+---
+
 ## What both share
 
 Every deployment — one node or three — is the **same Red Hat real-time host**,
