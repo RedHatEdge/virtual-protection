@@ -89,9 +89,9 @@ flowchart TB
 
     subgraph HOST["Red Hat real-time host — RHEL + KVM + Podman"]
         direction LR
-        SSC["ABB SSC600<br/>VM · virtio"]
+        SSC["ABB SSC600SW<br/>VM · virtio"]
         ORION["NovaTech Orion<br/>VM · SATA + e1000"]
-        EUTO["euto<br/>Podman container"]
+        EUTO["Euto Energy vSAS<br/>Podman container"]
     end
 
     BUS === HOST
@@ -105,9 +105,9 @@ flowchart TB
 
 | Relay | Packaging | Host adaptation | Delivery |
 |---|---|---|---|
-| **ABB SSC600** | VM (virtio) | guest has virtio → virtio disk + NICs; vCPUs pinned, `SCHED_FIFO` 50 | `.cab` → raw KVM image; licensed per-VM via ABB PCM600 after boot |
+| **ABB SSC600SW** | VM (virtio) | guest has virtio → virtio disk + NICs; vCPUs pinned, `SCHED_FIFO` 50 | `.cab` → raw KVM image; licensed per-VM via ABB PCM600 after boot |
 | **NovaTech Orion** | VM (non-virtio) | Photon OS guest has no virtio → **SATA disk + e1000 NIC**; `SCHED_FIFO` 40 | VMware OVA → qcow2 / raw; rendered with the `vpr` profile |
-| **euto** | Podman container | no VM, no guest OS — **shares the host real-time kernel**; pinned via cgroup cpuset, managed by systemd (Quadlet) | OCI container image → `podman` |
+| **Euto Energy vSAS** | Podman container | no VM, no guest OS — **shares the host real-time kernel**; pinned via cgroup cpuset, managed by systemd (Quadlet) | OCI container image → `podman` |
 
 The common thread is one Red Hat real-time host with several packaging models on
 it. A VM gives stronger isolation and runs a vendor's exact appliance image
@@ -147,4 +147,4 @@ architecture. Either produces the same real-time host.
 | Storage | Local disk | Ceph (shared, replicated) |
 | Failover orchestration | — | Pacemaker + corosync + STONITH |
 | Hardware | One host | Three hosts + cluster networking |
-| Best for | Cost-sensitive or non-critical sites, labs, evaluation | Protection that must stay available through a host loss |
+| Best for | Cost-sensitive or non-critical sites, labs, evaluation | Workload that must stay available/redundant through a (planned or unplanned) host loss |
