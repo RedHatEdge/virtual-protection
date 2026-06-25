@@ -46,7 +46,7 @@ A Virtual Protection Architecture deployment is one or more identical Red Hat En
 - **IEC 61850 station and process bus** preserved end to end through libvirt — multicast pass-through, dedicated VLANs, no software re-timestamping
 - **Dedicated PTP NIC** synchronized to a Power Profile grandmaster via `linuxptp` + `timemaster`
 - **Defence-in-depth security** built into the platform — SELinux enforcing, FIPS-mode crypto on demand, signed RPMs and container images, SPDX SBOM, audit forwarding, vTPM 2.0 on KVM
-- **Multi-vendor relay hosting** — the **ABB SSC600** protection and control VM is the validated Red Hat × ABB reference workload; other vendor VMs (Schneider, Siemens, GE Vernova, Hitachi RTAC, Kalkitech) run on the same platform alongside RTAC / VPR / PMU applications and Windows engineering workstations with PCI NIC passthrough
+- **Multi-vendor relay hosting** — the **ABB SSC600SW** protection and control VM is the validated Red Hat × ABB reference workload; other vendor VMs (e.g. Schneider Electric, Siemens, Siemens Energy, GE Vernova, Hitachi RTAC, Kalkitech) can run on the same platform alongside RTAC / VPR / PMU applications and Windows engineering workstations with PCI NIC passthrough
 
 The pattern's value at any scale: a single Red Hat-supported platform that hosts the substation's protection and automation software, decoupling the hardware refresh from the software refresh and letting the operator adopt new vendor VMs without changing the underlying stack.
 
@@ -112,10 +112,10 @@ The same RHEL build, RT tuning, KVM configuration, PTP setup, IEC 61850 plumbing
 
 The pattern is defined by a small number of deliberate constraints, not by a specific bill of materials. Any deployment that meets them implements the pattern.
 
-- **Red Hat-certified x86_64 servers**, ranging from fanless brick form factors for small substations to fan-cooled rack-mount servers for larger sites. See *Hardware footprint* below. Reference families include Dell PowerEdge XR, Advantech edge platforms, Supermicro / Crystal substation chassis. At three-node the three nodes are **identical hardware from a single vendor and SKU** — this lets any VM run on any node after a failure without per-host quirks, and lets deployment automation treat the three as fungible peers.
+- **Red Hat-certified x86_64 servers**, ranging from fanless brick form factors for small substations to fan-cooled rack-mount servers for larger sites. See *Hardware footprint* below. Reference families include Dell PowerEdge XR, Advantech ECU platforms, Moxa DA series, Welotec RSAPC Mk2, Lanner ICS, Supermicro / Crystal substation chassis. At three-node the three nodes are **identical hardware from a single vendor and SKU** — this lets any VM run on any node after a failure without per-host quirks, and lets deployment automation treat the three as fungible peers.
 - **Logical networks with mandatory separation:** *PTP* on its own NIC (all topologies); *cluster heartbeat* on its own NIC (three-node only). See *Network separation* below.
 - **Software stack:** RHEL 9.7+, libvirt/KVM, PTP via `timemaster` + `ptp4l`, RT-tuned chrony. Add Red Hat Ceph Storage 7 + RHEL HA add-on (Pacemaker + Corosync) at three-node.
-- **Workloads:** any combination of vendor protection VMs and station automation applications. The proven reference workload is the **ABB SSC600** protection and control VM — Red Hat's partnership with ABB is the validated end-to-end play for this pattern, with documented vendor guidance for CPU pinning, real-time priority, hugepages, and chrony tuning.
+- **Workloads:** any combination of vendor protection VMs and station automation applications. The proven reference workload is the **ABB SSC600SW** protection and control VM — Red Hat's partnership with ABB is the validated end-to-end play for this pattern, with documented vendor guidance for CPU pinning, real-time priority, hugepages, and chrony tuning.
 
 ---
 
@@ -127,7 +127,7 @@ The pattern is defined by a small number of deliberate constraints, not by a spe
 flowchart TB
   subgraph node[Single RHEL 9 node]
     direction TB
-    workload["VMs<br/>(ABB SSC600 + others)"]
+    workload["VMs<br/>(ABB SSC600SW + others)"]
     libvirt["KVM + libvirt<br/>RT tuning"]
     storage["Local storage<br/>(LVM thin / qcow2)"]
     rhel["RHEL 9 + kernel-rt"]
@@ -149,7 +149,7 @@ flowchart TB
     direction LR
     subgraph nodeA[Node A]
       direction TB
-      A_workload["VMs<br/>(ABB SSC600 + others)"]
+      A_workload["VMs<br/>(ABB SSC600SW + others)"]
       A_libvirt["KVM + libvirt<br/>RT tuning"]
       A_ceph["Ceph MON+MGR+OSDs<br/>+ CephFS client"]
       A_pcmk["Pacemaker + Corosync"]
@@ -160,7 +160,7 @@ flowchart TB
     end
     subgraph nodeB[Node B]
       direction TB
-      B_workload["VMs<br/>(ABB SSC600 + others)"]
+      B_workload["VMs<br/>(ABB SSC600SW + others)"]
       B_libvirt["KVM + libvirt<br/>RT tuning"]
       B_ceph["Ceph MON+MGR+OSDs<br/>+ CephFS client"]
       B_pcmk["Pacemaker + Corosync"]
@@ -171,7 +171,7 @@ flowchart TB
     end
     subgraph nodeC[Node C]
       direction TB
-      C_workload["VMs<br/>(ABB SSC600 + others)"]
+      C_workload["VMs<br/>(ABB SSC600SW + others)"]
       C_libvirt["KVM + libvirt<br/>RT tuning"]
       C_ceph["Ceph MON+MGR+OSDs<br/>+ CephFS client"]
       C_pcmk["Pacemaker + Corosync"]
@@ -221,6 +221,7 @@ flowchart LR
 - **PTP must be dedicated** (all topologies) because PTP event messages travel as ordinary Ethernet frames; if the same NIC is bridged into a VM, the kernel's bridge handling can deliver PTP frames to the guest instead of to the host's `ptp4l`. The result is the host clock drifts free, relay VMs miss timing windows, and `SYNCHRONIZATION_FAULT` events fire continuously.
 - **Heartbeat must be dedicated** (three-node only) because corosync packet loss is interpreted as node failure. Bridge churn from VM lifecycle events on a shared `br-mgmt` will cause periodic STP reconvergence, drop heartbeats, and split the cluster — the most expensive failure mode in any HA system.
 - The other networks (mgmt, station, plus storage at three-node) tolerate VLAN sharing with their respective workloads, but the architecture is cleanest when each is its own bond. At single-node, the dedicated storage network collapses to local-disk paths and is not required as a separate fabric.
+- Additional NICs can be required depending on the workload (e.g. dedicated Process Bus connections; virtualized or directly passed through to vPAC VMs)
 
 ### Components and why
 
@@ -368,7 +369,7 @@ All form factors host the same RHEL build, same KVM hypervisor, same RT tuning, 
 The vPAC Alliance defines the architectural pattern; multiple implementations of that pattern exist. The two most prominent:
 
 - **The Red Hat-aligned implementation defined in this document** — RHEL + KVM + Red Hat Ceph Storage + RHEL HA Add-on + Ansible. Commercially supported. The deployment automation lives at [`ansible-vpac`](https://github.com/RedHatEdge/ansible-vpac).
-- **[LF Energy SEAPATH](https://lfenergy.org/projects/seapath/)** — an open-source reference implementation of the same architectural target, originating with RTE (France) and Alliander (Netherlands), built on Debian / Yocto / CentOS Stream + KVM + Pacemaker + Ceph + OVS + Ansible. Production-deployed at RTE since end-2023.
+- **[LF Energy SEAPATH](https://lfenergy.org/projects/seapath/)** — an open-source reference implementation of the same architectural target, originating with French TSO RTE, built on Debian / Yocto / CentOS Stream + KVM + Pacemaker + Ceph + OVS + Ansible. Production-deployed at RTE since end-2023.
 
 Red Hat is a member of both the vPAC Alliance and LF Energy, and contributed the CentOS Stream 9 port to SEAPATH. The architectural commitments are intentionally compatible: a utility running SEAPATH on Debian today can adopt RHEL as the commercially-supported substrate without re-architecting. The Red Hat-aligned implementation in this document is what a customer gets when they want a Red Hat-supported lifecycle — 10-year RHEL, signed errata, Insights, Satellite, Image Builder — under the same architectural pattern.
 
@@ -384,7 +385,7 @@ Why each architectural choice was made over its plausible alternatives:
 | **Three nodes (when clustered), not two** | Quorum requires majority. Three nodes give majority quorum natively without an external arbiter. |
 | **CephFS for VM disks (not NFS)** | NFS requires a dedicated NFS server (single point of failure) or pNFS (operationally complex). CephFS is the storage cluster — same daemons, no extra layer. |
 | **RBD for the sanlock lockspace** | Sanlock needs a small shared block device with deterministic access semantics. CephFS doesn't expose block; RBD does. The lockspace image is small and rarely touched. |
-| **Pacemaker `VirtualDomain` — NOT OpenShift Virtualization, NOT OpenStack** | A substation deployment doesn't need a multi-tenant scheduler. Pacemaker's `VirtualDomain` resource agent on libvirt/KVM is the simplest tool that solves the VM failover problem, with a 20-year operational track record in utility / telco. OpenShift Virtualization (KubeVirt) and OpenStack target multi-tenant compute — different problem, different operational and certification surface, different scale assumptions. The pattern is RHEL + KVM + Pacemaker + Ceph; it is not a containers-on-Kubernetes pattern. |
+| **Pacemaker `VirtualDomain` — NOT OpenShift Virtualization, NOT OpenStack** | A substation deployment doesn't need a multi-tenant scheduler as it is typically very bespoke and static. Pacemaker's `VirtualDomain` resource agent on libvirt/KVM is the simplest tool that solves the VM failover problem, with a 20-year operational track record in utility / telco. OpenShift Virtualization (KubeVirt) and OpenStack target multi-tenant compute — different problem, different operational and certification surface, different scale assumptions. The pattern is RHEL + KVM + Pacemaker + Ceph; it is not a containers-on-Kubernetes pattern. |
 | **`fence_ipmilan` (not `fence_scsi`, `fence_sbd`)** | IPMI is universal on enterprise BMCs and provides hard power off — the only fencing mechanism that survives a kernel hang. SCSI fencing requires shared SCSI; SBD requires a watchdog timeout longer than RT scheduling latency. |
 | **`timemaster` (not pure `ptp4l` + `chronyd`)** | Two daemons fighting for the system clock is a documented operational hazard. `timemaster` is a single supervisor that arbitrates correctly. |
 | **Power Profile P2P, L2 transport** | IEEE C37.238 is the substation profile — peer-to-peer with transparent clocks in the network. Most utility networks are built this way. |
